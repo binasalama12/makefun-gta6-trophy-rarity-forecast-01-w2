@@ -100,6 +100,19 @@ def clamp_pct(x):
     return min(99.99, max(0.01, x))
 
 
+def rate_at(read, idx):
+    """Rate for trophy idx in one history read, or None.
+
+    A read whose rates list is shorter than the trophy list (the
+    trophy was missing from that read) counts as a missing rate,
+    not as a crash: the callers already know how to skip nulls.
+    """
+    rates = read.get("rates") or []
+    if idx >= len(rates):
+        return None
+    return rates[idx]
+
+
 def logit(pct):
     p = clamp_pct(pct)
     return math.log(p / (100.0 - p))
@@ -158,14 +171,27 @@ def forecast_case(case, name):
         win = list(range(len(history)))
     wt = [times[i] for i in win]
 
-    players = [float(h["players_tracked"]) for h in history]
+    players = []
+    for h in history:
+        try:
+            p = float(h.get("players_tracked"))
+        except (TypeError, ValueError):
+            p = 0.0
+        players.append(p if p > 0.0 else 0.0)
     last_players = players[-1]
+    if last_players <= 0.0:
+        # The last read carries no usable population (null/zero):
+        # fall back to the largest population seen so the flat-branch
+        # multiplication and the rate division stay finite.
+        last_players = max(players)
 
     # Flat detection: one distinct players value and no rate moved at all.
     flat_players = max(players) == min(players)
     rates_moved = False
     for h in history[1:]:
-        for a, b in zip(h["rates"], history[0]["rates"]):
+        for idx in range(len(trophies)):
+            a = rate_at(h, idx)
+            b = rate_at(history[0], idx)
             if a is not None and b is not None and a != b:
                 rates_moved = True
                 break
@@ -193,13 +219,13 @@ def forecast_case(case, name):
 
     rows = []
     for idx, trophy in enumerate(trophies):
-        last_rate = history[-1]["rates"][idx]
+        last_rate = rate_at(history[-1], idx)
         if last_rate is None:
             # Fall back to the most recent non-null read for this trophy.
             last_rate = 0.0
             for h in reversed(history):
-                if h["rates"][idx] is not None:
-                    last_rate = h["rates"][idx]
+                if rate_at(h, idx) is not None:
+                    last_rate = rate_at(h, idx)
                     break
 
         if is_flat:
@@ -215,7 +241,7 @@ def forecast_case(case, name):
             xs = []
             ys = []
             for i in win:
-                r = history[i]["rates"][idx]
+                r = rate_at(history[i], idx)
                 if r is None:
                     continue
                 earned = r / 100.0 * players[i]
